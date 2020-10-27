@@ -314,7 +314,15 @@ def load_data(db_name):
     return features, labels, recordings
 
 def get_index_by_code(recordings, partition):
-    
+    # This function selects recording indices corresponding to particular subset (train/dev/test)
+
+    # Inputs:
+    # recordings - pandas DataFrame with indices and recorging names of the data
+    # partition - list of recordings corresponding to particular subset
+
+    # Outputs:
+    # index - 1D array of indices corresponding to particular subset
+
     for t in range(0,len(partition)):
         temp = recordings[recordings == partition[t]].dropna().index
 
