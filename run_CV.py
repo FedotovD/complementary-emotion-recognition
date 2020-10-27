@@ -1,27 +1,5 @@
 import argparse
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--DB", type=str) # database code (SEW, CIT, UUD, IEC, SEW)
-parser.add_argument("--SN", type=str) # scenario (BAS, SWT, FLF)
-parser.add_argument("--SO", type=int) # sparsing original speaker
-parser.add_argument("--SI", type=int) # sparsing interlocutor
-parser.add_argument("--ED", type=str) # emotional dimension, arousal/valence
-parser.add_argument("--RS", type=int, default=1) # random seed for partitioning
-
-args = parser.parse_args()
-
-DB = args.DB
-SN = args.SN
-sparsing_interlocutor = args.SI
-sparsing = args.SO
-ED = args.ED
-RS = args.RS
-
-from numpy.random import seed
-seed(RS)
-from tensorflow import set_random_seed
-set_random_seed(RS)
-
 import numpy as np
 import pandas as pd
 import tensorflow as tf
@@ -41,9 +19,35 @@ from keras.optimizers import RMSprop
 from keras.callbacks import History
 
 import warnings
+
+from numpy.random import seed
+from tensorflow import set_random_seed
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--DB", type=str) # database code (SEW, CIT, UUD, IEC, SEW)
+parser.add_argument("--SN", type=str) # scenario (BAS, SWT, FLF)
+parser.add_argument("--SO", type=int) # sparsing original speaker
+parser.add_argument("--SI", type=int) # sparsing interlocutor
+parser.add_argument("--ED", type=str) # emotional dimension, arousal/valence
+parser.add_argument("--RS", type=int, default=1) # random seed for partitioning
+
+args = parser.parse_args()
+
+DB = args.DB
+SN = args.SN
+sparsing_interlocutor = args.SI
+sparsing = args.SO
+ED = args.ED
+RS = args.RS
+
+seed(RS)
+set_random_seed(RS)
+
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 results_folder = DB + '_' + ED + '_' + str(RS)
+
+# Check if results folder exists. If not - create one
 if not os.path.exists(results_folder):
     os.makedirs(results_folder)
 
@@ -96,36 +100,47 @@ def add_timesteps (X, Y, R, index, timewindowX, timewindowY, sc, labels_forward_
     return X_cont, Y_cont, Y_cont_index
 
 def smoother (prediction, index, index_cont, smoothing_windowsize, sc, labels_forward_shift):
+    # This funstion smoothes predictions for time steps obtained for different samples
+    
+    # Inputs:
+    # prediction - 2D prediction numpy array with shape [samples, timestamps]
+    # index - 1D index array with shape [samples]. It contains unique index of each time step.
+    # index_cont - 2D time-continuous index array with shape [samples, timestamps]. Corresponds to "prediction" array
+    # smoothing_windowsize - integer, number of time steps to smooth over
+    # sc - integer, sparsing coefficient, see here for more detail: http://www.lrec-conf.org/proceedings/lrec2018/pdf/923.pdf
+    # labels_forward_shift - float between 0 and 1, 0 means that features and labels will be taken for the same frames
+  
+    # Outputs:
+    # prediction_smooth - 1D numpy array of smoothed predictions with shape [samples]
+
+    # Create array for smooth predictions
     prediction_smooth = np.zeros((len(index)))
+    
+    # Loop over samples
     for i in range(0,len(index)):
-        #if i%10000 == 0:
-            #print(i)
         counter = 0
+	
+	# Restrict search space by setting lower and upper index boundaries
         lower_bound = max(0,i - smoothing_windowsize*sc * max(1,labels_forward_shift))
         upper_bound = i + smoothing_windowsize*sc * max(1,labels_forward_shift)
+	
+	# Find predictions for current index
         locate = np.where(index_cont[lower_bound:upper_bound] == index[i])
+	
+	# Sum up over them
         for loc_x in range(0, locate[0].shape[0]):
             for loc_y in range(0, locate[1].shape[0]):
                 prediction_smooth[i] += prediction[lower_bound + locate[0][loc_x],locate[1][loc_y]]
                 counter += 1
+		
+	# Calculate mean
         prediction_smooth[i] /= counter 
         
     return prediction_smooth
 
-def ccc_loss(gold, pred):  # Concordance correlation coefficient (CCC)-based loss function - using non-inductive statistics
-    # input (num_batches, seq_len, 1)
-    gold       = K.squeeze(gold, axis=-1)
-    pred       = K.squeeze(pred, axis=-1)
-    gold_mean  = K.mean(gold, axis=-1, keepdims=True)
-    pred_mean  = K.mean(pred, axis=-1, keepdims=True)
-    covariance = (gold-gold_mean)*(pred-pred_mean)
-    gold_var   = K.mean(K.square(gold-gold_mean), axis=-1, keepdims=True)
-    pred_var   = K.mean(K.square(pred-pred_mean), axis=-1, keepdims=True)
-    ccc        = K.constant(2.) * covariance / (gold_var + pred_var + K.square(gold_mean - pred_mean) + K.common.epsilon())
-    ccc_loss   = K.constant(1.) - ccc
-    return ccc_loss
-	
 def CCC_loss_tf(y_true, y_pred):
+    # Concordance correlation coefficient (CCC)-based loss function - using non-inductive statistics
+    # Used in TensorFlow based operations
 
     y_true_mean = tf.reduce_mean(y_true)
     y_pred_mean = tf.reduce_mean(y_pred)
@@ -142,7 +157,7 @@ def CCC_loss_tf(y_true, y_pred):
     return loss
 
 def CCC_metric(ser1, ser2):
-
+    # Concordance correlation coefficient (CCC)-based metric function
     if ser1.shape != ser2.shape :
         print("Series have different lengths")
     else:
@@ -151,7 +166,8 @@ def CCC_metric(ser1, ser2):
     return CCC
 
 def create_model(X_c, timewindow):
-
+    # This function creates a RNN-LSTM model to be trained further
+    # TODO: rewrite using dictionary
     model = Sequential()
     model.add(GaussianNoise(0.1, input_shape=(timewindow, X_c.shape[2])))
     model.add(LSTM(80, return_sequences=True, activation='tanh', implementation=0))
@@ -161,86 +177,135 @@ def create_model(X_c, timewindow):
     model.add(Dense(timewindow, activation='linear'))
 
     RMS = RMSprop(lr=0.005, rho=0.9, epsilon=1e-08, decay=0.0)
-    #set_random_seed(2019)
-    """inputs = Input(shape=(timewindow, X_c.shape[2]))
-    net = Masking(mask_value=0)(inputs)
-    net = LSTM(80, return_sequences=True, dropout=0.3, recurrent_dropout=0.3, activation='tanh')(net)
-    net = LSTM(60, return_sequences=True, dropout=0.3, recurrent_dropout=0.3, activation='tanh')(net)
-    outputs = TimeDistributed(Dense(1, activation='linear'))(net)
-
-    model = Model(inputs=inputs, outputs=outputs)"""
     model.compile(loss=CCC_loss_tf, optimizer=RMS)  # CCC-based loss function
 
     return model
 
 
-def predict_cross_corpora (trained_model, X_c, I_c, base_index):
-    
+def predict (trained_model, X_c, I_c, base_index):
+    # This function uses trained model to perform predict either for train, development or test subset
+
+    # Inputs:
+    # trained_model - trained Keras RNN-LSTM model
+    # X_c - 3D features numpy array with shape [samples, timesteps, features]
+    # I_c - 2D index numpy array with shape [samples, timesteps]
+    # base_index - 1D index array with shape [samples]
+  
+    # Outputs:
+    # P_train_clean - 1D numpy array of smoothed and cleaned predictions with shape [samples]
+
+    # Obtain continuous predictions
     P_train_c = trained_model.predict(X_c, verbose=0)
 
-    #print('\nSmoothing...')
+    # Smooth predictions to 1D array
     P_train = smoother(P_train_c, base_index, I_c, timewindow, sparsing, 0)
     
-    P_train_denom = np.nan_to_num(P_train)
+    # Check for NaNs
+    P_train_clean = np.nan_to_num(P_train)
     
-    return P_train_denom
+    return P_train_clean
 
 def load_data(db_name):
+    # This function loads data from *.csv files of features and labels
+
+    # Inputs:
+    # db_name - three-letter index of the database. E.g. "SEW" = SEWA database.
+
+    # Outputs:
+    # features - 2D pandas DataFrame of features with shape [samples, features]
+    # labels - 1D pandas DataFrame of labels with shape [samples]
+    # recordings - 1D pandas DataFrame of recording indices with shape [samples]
+
     print('Load data')
 
+    # SEWA database
     if db_name == 'SEW':
         path = 'data/'
-        features = pd.read_csv(path + 'SEW_features_egemaps_0.3_10Hz.csv', index_col=0) # features
+	# Load features
+        features = pd.read_csv(path + 'SEW_features_egemaps_0.3_10Hz.csv', index_col=0)
+	
+	# Load labels
         if ED == 'arousal':
             labels = pd.read_csv(path + 'SEW_labels_10Hz.csv', index_col=0).arousal.to_frame()
         elif ED == 'valence':
             labels = pd.read_csv(path + 'SEW_labels_10Hz.csv', index_col=0).valence.to_frame() 
-        recordings = pd.DataFrame([x[:7] for x in labels.index], index=labels.index) # recordings
-
+	
+	# Load recordings
+        recordings = pd.DataFrame([x[:7] for x in labels.index], index=labels.index)
+	
+    # UUDB database
     elif db_name == 'UUD':
         path = 'data/'
-        features = pd.read_csv(path + 'UUD_features_LLD_10Hz.csv', index_col=0) # features
+	# Load features
+        features = pd.read_csv(path + 'UUD_features_LLD_10Hz.csv', index_col=0)
+	
+	# Load labels
         if ED == 'arousal':
             labels = pd.read_csv(path + 'UUD_labels_TC.csv', index_col=0).arousal.to_frame()
         elif ED == 'valence':
             labels = pd.read_csv(path + 'UUD_labels_TC.csv', index_col=0).valence.to_frame() 
-        recordings = pd.DataFrame([x[:7] for x in labels.index], index=labels.index) # recordings
-
+	
+	# Load recordings
+        recordings = pd.DataFrame([x[:7] for x in labels.index], index=labels.index)
+	
+    # CreativeIT database
     elif db_name == 'CIT':
         path = 'data/'
+	# Load features
         features = pd.read_csv(path + 'CIT_features_LLD_10Hz.csv', index_col=0)
+	
+	# Load labels
         if ED == 'arousal':
             labels = pd.read_csv(path + 'CIT_labels_10Hz.csv', index_col=0).arousal.to_frame()
         elif ED == 'valence':
             labels = pd.read_csv(path + 'CIT_labels_10Hz.csv', index_col=0).valence.to_frame()
-        recordings = pd.DataFrame([x[:7] for x in features.index], index=features.index) # recordings
+	
+	# Load recordings
+        recordings = pd.DataFrame([x[:7] for x in features.index], index=features.index)
 
+    # CreativeIT database
     elif db_name == 'SEM':
         path = 'data/'
-        features = pd.read_csv(path + 'SEM_features_LLD_10Hz_d.csv', index_col=0) # features
+	# Load features
+        features = pd.read_csv(path + 'SEM_features_LLD_10Hz_d.csv', index_col=0)
+	
+	# Load labels
         if ED == 'arousal':
             labels = pd.read_csv(path + 'SEM_labels_d.csv', index_col=0).arousal.to_frame()
         elif ED == 'valence':
-            labels = pd.read_csv(path + 'SEM_labels_d.csv', index_col=0).valence.to_frame() 
-        recordings = pd.DataFrame([x[:7] for x in labels.index], index=labels.index) # recordings
+            labels = pd.read_csv(path + 'SEM_labels_d.csv', index_col=0).valence.to_frame()
+	
+	# Load recordings
+        recordings = pd.DataFrame([x[:7] for x in labels.index], index=labels.index)
 
+    # IEMOCAP database
     elif db_name == 'IEC':
         path = 'data/'
-        features = pd.read_csv(path + 'IEC_features_LLD_10Hz.csv', index_col=0) # features
+	# Load features
+        features = pd.read_csv(path + 'IEC_features_LLD_10Hz.csv', index_col=0)
+	
+	# Load labels
         if ED == 'arousal':
             labels = pd.read_csv(path + 'IEC_labels_TC.csv', index_col=0).arousal.to_frame()
         elif ED == 'valence':
             labels = pd.read_csv(path + 'IEC_labels_TC.csv', index_col=0).valence.to_frame() 
-        recordings = pd.DataFrame([x[:7] for x in labels.index], index=labels.index) # recordings
+	
+	# Load recordings
+        recordings = pd.DataFrame([x[:7] for x in labels.index], index=labels.index)
 
+    # Check intersection of features and labels
     ind = features.index.intersection(labels.index)
 
+    # Subset each DataFrame accordingly
     features = features.loc[ind]
     labels = labels.loc[ind]
     recordings = recordings.loc[ind]
         
+    # Check is the length is the same. This may still be an issue even after subsetting with "ind" list, as there might be duplicates in data
     if features.shape[0] == labels.shape[0] and features.shape[0] == recordings.shape[0]:
         print('Shapes are OK!')
+    
+    # If sizes do not match, print them 
     else:
         print(features.shape[0])
         print(labels.shape[0])
@@ -522,29 +587,25 @@ for f_t in range(n_fold):
                                                                 DB, sparsing_interlocutor=6)
             
             # Modeling
-            #set_random_seed(2019)
             CCC_dev_best = 0
             model = create_model(X_c, timewindow)
             for e in range(0,10):
                 model.fit(X_c, Y_c, batch_size=128, epochs = 1, shuffle=True, verbose=0)
 
                 # Evaluate development
-                p = predict_cross_corpora(model, X_c_dev, I_c_dev, dev_index)
+                p = predict(model, X_c_dev, I_c_dev, dev_index)
                 p_CCC_d = CCC_metric(p, labels.loc[dev_index].iloc[:,0].as_matrix())
-                #sys.stdout.write('\t\tDevel: ' + str(p_CCC_d))
                 print('\t\tDevel: ' + str(p_CCC_d))
                 
                 if p_CCC_d > CCC_dev_best:
                     save_model(model, results_folder + '/' + m_name + '.hdf5')
                     CCC_dev_best = p_CCC_d
 
-            #print('Predict...')
             best_model = load_model(results_folder + '/' + m_name + '.hdf5',compile=False)
-            p = predict_cross_corpora(best_model, X_c_test, I_c_test, test_index)
+            p = predict(best_model, X_c_test, I_c_test, test_index)
 
             p_CCC_t = CCC_metric(p, labels.loc[test_index].iloc[:,0].as_matrix())
             
-            #sys.stdout.write('\t\t\tTest prediction: ' + str(p_CCC_t))
             print('\t\t\tTest prediction: ' + str(p_CCC_t))
             
             full_results[count] = p_CCC_t
